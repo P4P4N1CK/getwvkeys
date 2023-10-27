@@ -1,6 +1,6 @@
 """
  This file is part of the GetWVKeys project (https://github.com/GetWVKeys/getwvkeys)
- Copyright (C) 2022 Notaghost, Puyodead1 and GetWVKeys contributors 
+ Copyright (C) 2022-2023 Notaghost, Puyodead1 and GetWVKeys contributors 
  
  This program is free software: you can redistribute it and/or modify
  it under the terms of the GNU Affero General Public License as published
@@ -29,9 +29,16 @@ from flask import jsonify, render_template
 from flask_login import UserMixin
 from flask_sqlalchemy import SQLAlchemy
 from requests.exceptions import ProxyError
-from werkzeug.exceptions import BadRequest, Forbidden, NotFound, NotImplemented
+from werkzeug.exceptions import (
+    BadRequest,
+    Forbidden,
+    InternalServerError,
+    NotFound,
+    NotImplemented,
+)
 
 from getwvkeys import config
+from getwvkeys.models.APIKey import APIKey as APIKeyModel
 from getwvkeys.models.CDM import CDM as CDMModel
 from getwvkeys.models.Key import Key as KeyModel
 from getwvkeys.models.User import User as UserModel
@@ -64,6 +71,8 @@ sessions = dict()
 
 
 def get_random_cdm():
+    if len(config.DEFAULT_CDMS) == 0:
+        raise Exception("No CDMS configured")
     return secrets.choice(config.DEFAULT_CDMS)
 
 
@@ -324,7 +333,10 @@ class Pywidevine:
                 return jsonify(data)
             return render_template("success.html", page_title="Success", results=data)
 
-        wvdecrypt = WvDecrypt(self.pssh, deviceconfig.DeviceConfig(self.library, self.buildinfo))
+        try:
+            wvdecrypt = WvDecrypt(self.pssh, deviceconfig.DeviceConfig(self.library, self.buildinfo))
+        except Exception as e:
+            raise InternalServerError(f"Failed to create session: {e}")
         if self.server_certificate:
             wvdecrypt.set_server_certificate(self.server_certificate)
         challenge = wvdecrypt.create_challenge()
@@ -539,6 +551,13 @@ class User(UserMixin):
     def reset_api_key(self):
         api_key = secrets.token_hex(32)
         self.user_model.api_key = api_key
+
+        # check if we already have the key recorded in the history, if not (ex: accounts created before implementation), add it
+        a = APIKeyModel.query.filter_by(user_id=self.user_model.id, api_key=api_key)
+        if not a:
+            history_entry = APIKeyModel(user_id=self.user_model.id, api_key=api_key)
+            db.session.add(history_entry)
+
         self.db.session.commit()
 
     def delete_cdm(self, id):
@@ -570,6 +589,8 @@ class User(UserMixin):
             public_flags=userinfo.get("public_flags"),
             api_key=api_key,
         )
+        history_entry = APIKeyModel(user_id=user.id, api_key=api_key)
+        db.session.add(history_entry)
         db.session.add(user)
         db.session.commit()
 
